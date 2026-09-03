@@ -98,9 +98,60 @@ func (r *LCMReconciler) Reconcile(ctx context.Context, config *upgrade.Config) (
 			logger.Info("LCM chart upgrade in progress, waiting", "chart", name)
 			break
 		}
+
+		if state == helm.ChartStateFailed {
+			// Failure in upgrading either LCM CRD or LCM chart should result in overall upgrade failure,
+			// and prevent moving forward to any other upgrade phase
+			return &upgrade.PhaseStatus{
+				State:   lifecyclev1alpha1.UpgradeFailed,
+				Message: fmt.Sprintf("Failed to upgrade LCM chart %q", name),
+			}, fmt.Errorf("upgrading LCM chart %q", name)
+		}
 	}
 
-	return aggregateResults(results, len(orderedChartConfigs), "LCM"), nil
+	return aggregateLCMResults(results, len(orderedChartConfigs)), nil
+}
+
+// aggregateLCMResults aggregates chart upgrade results into a single PhaseStatus.
+func aggregateLCMResults(results []chartUpgradeResult, totalCharts int) *upgrade.PhaseStatus {
+	if len(results) == 0 {
+		return &upgrade.PhaseStatus{
+			State:   lifecyclev1alpha1.UpgradeSucceeded,
+			Message: "No LCM charts to reconcile",
+		}
+	}
+
+	var inProgress, succeeded, skipped int
+
+	for _, result := range results {
+		switch result.state {
+		case helm.ChartStateInProgress:
+			inProgress++
+		case helm.ChartStateSucceeded, helm.ChartStateVersionAlreadyInstalled:
+			succeeded++
+		case helm.ChartStateNotInstalled:
+			skipped++
+		}
+	}
+
+	if inProgress > 0 {
+		return &upgrade.PhaseStatus{
+			State:   lifecyclev1alpha1.UpgradeInProgress,
+			Message: fmt.Sprintf("LCM charts in progress (%d/%d completed, %d skipped)", succeeded, totalCharts-skipped, skipped),
+		}
+	}
+
+	if succeeded == 0 && skipped == totalCharts {
+		return &upgrade.PhaseStatus{
+			State:   lifecyclev1alpha1.UpgradeSucceeded,
+			Message: "All LCM charts skipped (not installed on cluster)",
+		}
+	}
+
+	return &upgrade.PhaseStatus{
+		State:   lifecyclev1alpha1.UpgradeSucceeded,
+		Message: fmt.Sprintf("All %d LCM charts upgraded successfully (%d skipped)", succeeded, skipped),
+	}
 }
 
 // isLCMChart reports whether name is one of LCM's own charts. These are upgraded by the LCM phase and skipped by the Helm chart phase

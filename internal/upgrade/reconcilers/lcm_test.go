@@ -29,6 +29,8 @@ import (
 	"github.com/suse/elemental-lifecycle-manager/internal/upgrade/reconcilers"
 	"github.com/suse/elemental-lifecycle-manager/internal/upgrade/reconcilers/testutil"
 	"github.com/suse/elemental/v3/pkg/manifest/api"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -120,7 +122,7 @@ var _ = Describe("LCMReconciler", func() {
 				}
 
 				lcmChart := testutil.NewTestHelmChart(lcmChartName, lcmChartV2)
-				config := testutil.NewTestConfig(testutil.WithHelmChartConfig([]*upgrade.HelmChartConfig{{Chart: lcmChart}}))
+				config = testutil.NewTestConfig(testutil.WithHelmChartConfig([]*upgrade.HelmChartConfig{{Chart: lcmChart}}))
 				status, err := reconciler.Reconcile(ctx, config)
 
 				Expect(err).ToNot(HaveOccurred())
@@ -139,7 +141,7 @@ var _ = Describe("LCMReconciler", func() {
 			It("should upgrade LCM CRDs chart before the LCM chart", func() {
 				lcmChart := testutil.NewTestHelmChart(lcmChartName, lcmChartV2, testutil.WithDependencies([]api.HelmChartDependency{{Name: lcmCRDChartName, Type: api.DependencyTypeHelm}}))
 				lcmCRDChart := testutil.NewTestHelmChart(lcmCRDChartName, lcmCRDChartV2)
-				config := testutil.NewTestConfig(testutil.WithHelmChartConfig([]*upgrade.HelmChartConfig{
+				config = testutil.NewTestConfig(testutil.WithHelmChartConfig([]*upgrade.HelmChartConfig{
 					{
 						Chart: lcmChart,
 					},
@@ -201,6 +203,60 @@ var _ = Describe("LCMReconciler", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(status.State).To(Equal(lifecyclev1alpha1.UpgradeSucceeded))
 				Expect(status.Message).To(Equal("All 2 LCM charts upgraded successfully (0 skipped)"))
+			})
+
+			Context("when an LCM chart fails to upgrade", func() {
+				It("should fail if CRDs chart fails to upgrade", func() {
+					lcmChart := testutil.NewTestHelmChart(lcmChartName, lcmChartV2, testutil.WithDependencies([]api.HelmChartDependency{{Name: lcmCRDChartName, Type: api.DependencyTypeHelm}}))
+					lcmCRDChart := testutil.NewTestHelmChart(lcmCRDChartName, lcmCRDChartV2)
+					config = testutil.NewTestConfig(testutil.WithHelmChartConfig([]*upgrade.HelmChartConfig{
+						{
+							Chart: lcmChart,
+						},
+						{
+							Chart: lcmCRDChart,
+						},
+					}))
+
+					mockHelm.RetrieveReleaseFn = func(name string) (*helm.ReleaseInfo, error) {
+						switch name {
+						case lcmChartName:
+							return &helm.ReleaseInfo{ChartVersion: lcmChartV1, Namespace: testNamespace}, nil
+						case lcmCRDChartName:
+							return &helm.ReleaseInfo{ChartVersion: lcmCRDChartV1, Namespace: testNamespace}, nil
+						}
+						return nil, helm.ErrReleaseNotFound
+					}
+
+					status, err := reconciler.Reconcile(ctx, config)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(status.State).To(Equal(lifecyclev1alpha1.UpgradeInProgress))
+
+					// HelmChart CR for LCM CRDs should be created first as it's a dependency of LCM chart.
+					helmLCMCRDChart := &helmv1.HelmChart{}
+					Expect(fakeClient.Get(ctx, types.NamespacedName{
+						Name:      lcmCRDChartName,
+						Namespace: reconcilers.HelmChartNamespace,
+					}, helmLCMCRDChart)).To(Succeed())
+
+					// HelmChart CR for LCM chart shouldn't be created yet
+					helmLCMChart := &helmv1.HelmChart{}
+					err = fakeClient.Get(ctx, types.NamespacedName{Name: lcmChartName, Namespace: reconcilers.HelmChartNamespace}, helmLCMChart)
+					Expect(apierrors.IsNotFound(err)).To(BeTrue())
+
+					helmLCMCRDChart.Status.JobName = testJobCRDS
+					Expect(fakeClient.Update(ctx, helmLCMCRDChart)).To(Succeed())
+
+					failedJob := testutil.NewTestJob(testJobCRDS, reconcilers.HelmChartNamespace, false)
+					failedJob.Status.Conditions = append(failedJob.Status.Conditions, batchv1.JobCondition{Type: batchv1.JobFailed, Status: corev1.ConditionTrue})
+					Expect(fakeClient.Create(ctx, failedJob)).To(Succeed())
+
+					status, err = reconciler.Reconcile(ctx, config)
+					Expect(err).To(HaveOccurred())
+					Expect(status.State).To(Equal(lifecyclev1alpha1.UpgradeFailed))
+					Expect(status.Message).To(Equal("Failed to upgrade LCM chart \"elemental-lifecycle-manager-crds\""))
+				})
+
 			})
 		})
 	})

@@ -138,7 +138,7 @@ func (r *HelmReconciler) reconcileHelmCharts(ctx context.Context, releaseName, r
 		}
 	}
 
-	return aggregateResults(results, len(orderedChartConfigs), "Helm"), nil
+	return aggregateResults(results, len(orderedChartConfigs)), nil
 }
 
 // sortChartConfigsByDependencies returns a sorted slice of chart configurations,
@@ -413,11 +413,11 @@ func (r *HelmReconciler) evaluateHelmChartJobStatus(ctx context.Context, chart *
 }
 
 // aggregateResults aggregates chart upgrade results into a single PhaseStatus.
-func aggregateResults(results []chartUpgradeResult, totalCharts int, chartKind string) *upgrade.PhaseStatus {
+func aggregateResults(results []chartUpgradeResult, totalCharts int) *upgrade.PhaseStatus {
 	if len(results) == 0 {
 		return &upgrade.PhaseStatus{
 			State:   lifecyclev1alpha1.UpgradeSucceeded,
-			Message: fmt.Sprintf("No %s charts to reconcile", chartKind),
+			Message: "No Helm charts to reconcile",
 		}
 	}
 
@@ -450,20 +450,20 @@ func aggregateResults(results []chartUpgradeResult, totalCharts int, chartKind s
 	if inProgress > 0 {
 		return &upgrade.PhaseStatus{
 			State:   lifecyclev1alpha1.UpgradeInProgress,
-			Message: fmt.Sprintf("%s charts in progress (%d/%d completed, %d skipped)", chartKind, succeeded, totalCharts-skipped, skipped),
+			Message: fmt.Sprintf("Helm charts in progress (%d/%d completed, %d skipped)", succeeded, totalCharts-skipped, skipped),
 		}
 	}
 
 	if succeeded == 0 && skipped == totalCharts {
 		return &upgrade.PhaseStatus{
 			State:   lifecyclev1alpha1.UpgradeSucceeded,
-			Message: fmt.Sprintf("All %s charts skipped (not installed on cluster)", chartKind),
+			Message: "All Helm charts skipped (not installed on cluster)",
 		}
 	}
 
 	return &upgrade.PhaseStatus{
 		State:   lifecyclev1alpha1.UpgradeSucceeded,
-		Message: fmt.Sprintf("All %d %s charts upgraded successfully (%d skipped)", succeeded, chartKind, skipped),
+		Message: fmt.Sprintf("All %d Helm charts upgraded successfully (%d skipped)", succeeded, skipped),
 	}
 }
 
